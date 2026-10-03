@@ -1,0 +1,25 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version: '1.22.x'}
+      - run: go test ./...
+      - name: Build static binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags '-s -w' -o palm-agent-linux-amd64 .
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags '-s -w' -o palm-agent-linux-arm64 .
+          sha256sum palm-agent-linux-* > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            palm-agent-linux-amd64
+            palm-agent-linux-arm64
+            checksums.txt
