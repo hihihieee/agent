@@ -28,7 +28,7 @@ usage(){ cat <<'EOF'
 Palm Agent installer
 
   install.sh install --secret SECRET --endpoint URL --node NODE [options]
-  install.sh update
+  install.sh update [--version TAG]
   install.sh doctor | status | logs
   install.sh uninstall [--purge]
 
@@ -119,17 +119,16 @@ case "$ACTION" in
   *) usage; die "unknown action: $ACTION";;
 esac
 
-if [ "$ACTION" = update ] && [ -f "$ENV_FILE" ]; then
-  load_config
-else
-  load_legacy_config
-  NODE="${NODE:-$(hostname -s)}"
-  WINDOW="${WINDOW:-90}"
-  INTERVAL="${INTERVAL:-20}"
-  STATS_INTERVAL="${STATS_INTERVAL:-15}"
-  [ -n "$SECRET" ] || { if [ "$NON_INTERACTIVE" = 0 ]; then read -rsp "HMAC secret: " SECRET; echo; fi; }
-  [ -n "$SECRET" ] || die "--secret or --secret-file is required"
-fi
+# Re-running `install` is an in-place upgrade. Explicit CLI options win, while
+# omitted values are inherited from the currently installed (or legacy) agent.
+load_config_file "$ENV_FILE" 1 || true
+load_legacy_config
+NODE="${NODE:-$(hostname -s)}"
+WINDOW="${WINDOW:-90}"
+INTERVAL="${INTERVAL:-20}"
+STATS_INTERVAL="${STATS_INTERVAL:-15}"
+[ -n "$SECRET" ] || { if [ "$NON_INTERACTIVE" = 0 ]; then read -rsp "HMAC secret: " SECRET; echo; fi; }
+[ -n "$SECRET" ] || die "--secret or --secret-file is required for the first installation"
 command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1 || die "curl or wget is required"
 case "$REPO" in */*) ;; *) die "--repo must be OWNER/REPO";; esac
 case "$NODE" in ''|*[!A-Za-z0-9._-]*) die "node may contain A-Z, a-z, 0-9, dot, underscore and dash";; esac
