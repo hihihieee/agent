@@ -1,3 +1,5 @@
 palm-agent
 palm-agent-linux-*
 checksums.txt
+__pycache__/
+*.py[cod]

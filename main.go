@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -27,7 +28,7 @@ import (
 	"time"
 )
 
-const version = "2.0.0"
+const version = "2.1.0"
 
 type Config struct {
 	Endpoint, Secret, Node, LogPath, StateDir, NetworkInterface string
@@ -56,6 +57,27 @@ type Stats struct {
 	Mem    map[string]uint64  `json:"mem"`
 	Swap   map[string]uint64  `json:"swap"`
 	Net    Net                `json:"net"`
+}
+type ControlPoll struct {
+	Node string `json:"node"`
+	TS   int64  `json:"ts"`
+}
+type ControlJob struct {
+	ID      string          `json:"id"`
+	Node    string          `json:"node"`
+	Action  string          `json:"action"`
+	Payload json.RawMessage `json:"payload"`
+}
+type ControlEnvelope struct {
+	OK  bool        `json:"ok"`
+	Job *ControlJob `json:"job"`
+}
+type ControlResult struct {
+	Node   string `json:"node"`
+	ID     string `json:"id"`
+	OK     bool   `json:"ok"`
+	Result any    `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 type State struct {
 	Path   string                      `json:"path"`
@@ -311,29 +333,118 @@ func follow(ctx context.Context, cfg Config, tracker *Tracker) error {
 }
 
 func signedPost(ctx context.Context, client *http.Client, url, secret string, payload any) error {
+	_, err := signedPostJSON(ctx, client, url, secret, payload)
+	return err
+}
+
+func signedPostJSON(ctx context.Context, client *http.Client, url, secret string, payload any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(body)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Signature", hex.EncodeToString(mac.Sum(nil)))
 	req.Header.Set("User-Agent", "palm-agent/"+version)
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
+	response, readErr := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if readErr != nil {
+		return nil, readErr
 	}
-	return nil
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(response)))
+	}
+	return response, nil
+}
+
+func controlBase(endpoint string) string {
+	return strings.TrimSuffix(endpoint, "/limiter/ingest") + "/limiter/control"
+}
+
+func executeControl(job *ControlJob) (any, error) {
+	helper := "/usr/local/lib/palm-agent/xui_config.py"
+	switch job.Action {
+	case "read_config":
+		out, err := exec.Command(helper, "read").CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("read config: %s", strings.TrimSpace(string(out)))
+		}
+		var result any
+		if err := json.Unmarshal(out, &result); err != nil {
+			return nil, err
+		}
+		return result, nil
+	case "write_config":
+		var payload struct {
+			Config   json.RawMessage `json:"config"`
+			Expected string          `json:"expected_revision"`
+		}
+		if err := json.Unmarshal(job.Payload, &payload); err != nil {
+			return nil, err
+		}
+		if len(payload.Config) == 0 || payload.Expected == "" {
+			return nil, errors.New("config and expected_revision required")
+		}
+		cmd := exec.Command(helper, "write", "--expected-revision", payload.Expected)
+		cmd.Stdin = bytes.NewReader(payload.Config)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("write config: %s", strings.TrimSpace(string(out)))
+		}
+		var result any
+		if err := json.Unmarshal(out, &result); err != nil {
+			return nil, err
+		}
+		return result, nil
+	case "restart_xui":
+		out, err := exec.Command("/bin/systemctl", "restart", "x-ui.service").CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("restart x-ui: %s", strings.TrimSpace(string(out)))
+		}
+		return map[string]any{"restarted": true}, nil
+	default:
+		return nil, fmt.Errorf("unsupported action %q", job.Action)
+	}
+}
+
+func controlLoop(ctx context.Context, cfg Config) {
+	client := &http.Client{Timeout: 20 * time.Second}
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	base := controlBase(cfg.Endpoint)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			body, err := signedPostJSON(ctx, client, base+"/poll", cfg.Secret, ControlPoll{cfg.Node, time.Now().Unix()})
+			if err != nil {
+				log.Printf("control poll failed: %v", err)
+				continue
+			}
+			var envelope ControlEnvelope
+			if json.Unmarshal(body, &envelope) != nil || envelope.Job == nil {
+				continue
+			}
+			result, runErr := executeControl(envelope.Job)
+			report := ControlResult{Node: cfg.Node, ID: envelope.Job.ID, OK: runErr == nil, Result: result}
+			if runErr != nil {
+				report.Error = runErr.Error()
+			}
+			if err := signedPost(ctx, client, base+"/result", cfg.Secret, report); err != nil {
+				log.Printf("control result failed job=%s: %v", envelope.Job.ID, err)
+			}
+		}
+	}
 }
 func sender(ctx context.Context, cfg Config, tracker *Tracker) {
 	ticker := time.NewTicker(cfg.Interval)
@@ -564,6 +675,7 @@ func main() {
 	tracker := &Tracker{seen: map[string]map[string]time.Time{}, window: cfg.Window}
 	go sender(ctx, cfg, tracker)
 	go statsLoop(ctx, cfg)
+	go controlLoop(ctx, cfg)
 	if err := follow(ctx, cfg, tracker); err != nil {
 		log.Fatal(err)
 	}

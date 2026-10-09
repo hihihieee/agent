@@ -6,6 +6,7 @@ readonly BIN=/usr/local/bin/palm-agent
 readonly ENV_FILE=/etc/palm-agent.env
 readonly UNIT_FILE=/etc/systemd/system/palm-agent.service
 readonly STATE_DIR=/var/lib/palm-agent
+readonly LIB_DIR=/usr/local/lib/palm-agent
 readonly LEGACY_BIN=/usr/local/bin/palm-iplog
 readonly LEGACY_AWK=/usr/local/bin/palm-iplog-parse.awk
 readonly LEGACY_STATS_BIN=/usr/local/bin/palm-iplog-stats
@@ -187,6 +188,14 @@ install_source(){
 if [ "$BUILD_FROM_SOURCE" = 1 ]; then install_source; else install_release; fi
 install -m 0755 "$tmp/$APP" "$BIN"
 install -d -m 0700 "$STATE_DIR"
+install -d -m 0755 "$LIB_DIR"
+script_source="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd 2>/dev/null || true)/xui_config.py"
+if [ -f "$script_source" ]; then
+  install -m 0755 "$script_source" "$LIB_DIR/xui_config.py"
+else
+  download "https://raw.githubusercontent.com/$REPO/main/xui_config.py" "$tmp/xui_config.py"
+  install -m 0755 "$tmp/xui_config.py" "$LIB_DIR/xui_config.py"
+fi
 umask 077
 escape_env(){ local value="$1"; value="${value//\\/\\\\}"; value="${value//\"/\\\"}"; printf '%s' "$value"; }
 cat > "$ENV_FILE" <<EOF
@@ -219,7 +228,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/palm-agent
+ReadWritePaths=/var/lib/palm-agent /etc/x-ui /usr/local/x-ui/bin
 
 [Install]
 WantedBy=multi-user.target
