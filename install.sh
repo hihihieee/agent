@@ -188,7 +188,11 @@ if [ "$BUILD_FROM_SOURCE" = 1 ]; then install_source; else install_release; fi
 install -m 0755 "$tmp/$APP" "$BIN"
 install -d -m 0700 "$STATE_DIR"
 install -d -m 0755 "$LIB_DIR"
-script_source="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd 2>/dev/null || true)/xui_config.py"
+script_path="${BASH_SOURCE[0]:-}"
+script_source=""
+if [ -n "$script_path" ]; then
+  script_source="$(cd "$(dirname "$script_path")" 2>/dev/null && pwd 2>/dev/null || true)/xui_config.py"
+fi
 if [ -f "$script_source" ]; then
   install -m 0755 "$script_source" "$LIB_DIR/xui_config.py"
 else
